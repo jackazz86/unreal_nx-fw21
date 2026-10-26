@@ -39,8 +39,8 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET		:=	$(notdir $(CURDIR))
 APP_TITLE	:=	Unreal
-APP_AUTHOR	:=	Epic Games, OldUnreal, fgsfds
-APP_VERSION	:=	r2 / 227j
+APP_AUTHOR	:=	Epic Games, OldUnreal, fgsfds, jackazz86
+APP_VERSION	:=	r2 fork / 227j
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
