@@ -661,7 +661,7 @@ typedef struct {
 
 static nxd_slot_t nxd_cache[NXD_SLOTS];
 static unsigned   nxd_bound_tex = 0;
-static int        nxd_enabled = 1;   // 0 = deduplicazione disattivata
+static int        nxd_enabled = 1;   // 0 = duplicate upload skipping off
 static u64        nxd_skipped = 0;
 #if NXP_PROFILE
 static u64        nxd_win_skipped = 0;
