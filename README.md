@@ -175,6 +175,9 @@ To turn on the built-in profiler, set `NXP_PROFILE` to `1` near the top of `sour
 
 ### Credits
 * fgsfds for unreal_nx and libsolder, which this fork is built on;
+* jackazz86, who maintains this fork and tested every change on a real Switch;
+* Claude (Anthropic), an AI coding assistant, which worked with jackazz86 on the changes in this fork (the upload limit,
+  gyro, quick save, the libsolder fix and the documentation). The commits carry it as co-author;
 * OldUnreal for the 227j patch, which provides the engine this loader runs;
 * Switchbrew for libnx;
 * devkitPro for devkitA64.
