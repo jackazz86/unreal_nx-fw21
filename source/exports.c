@@ -804,6 +804,187 @@ static u64 nxp_sub_calls, nxp_sub_ticks;   // glTexSubImage2D
 
 static u64 nxp_frame_mark;                 // tick at previous swap - also drives gyro's per-frame dt
 
+// --- per-texture update rate limit -----------------------------------------
+// The stock renderer re-uploads a lightmap every frame in which a dynamic light
+// touches it, and each upload costs about half a millisecond here whatever its
+// size. Same remedy as NXLightUpdateInterval in the rebuilt renderer, applied
+// from outside so the stock OpenGLDrv.so can be used: a texture that has just
+// been updated is not updated again for N frames. The update the renderer
+// issues in between is kept (the newest one per region) and, if the renderer
+// does not issue another when the texture is due, sent at the end of that
+// frame, so a texture never stays stale after its light has stopped changing.
+//
+// Safety: only 2D sub-uploads of tightly packed, known-format data are held
+// back; anything else goes straight through. The first upload of a texture, and
+// every further upload within the same frame, passes untouched.
+// gyro.cfg: uploadinterval = N (1 = off).
+#define NXT_PENDING_MAX 384
+#define NXT_MAX_BYTES   65536
+#define NXT_TEX_SLOTS   8192
+
+typedef struct { unsigned tex; unsigned last; } nxt_state_t;
+typedef struct {
+  int used;
+  unsigned tex, unit, lvl, x, y, w, h, fmt, typ, size;
+  unsigned char *data;
+} nxt_pend_t;
+
+static nxt_state_t nxt_state[NXT_TEX_SLOTS];
+static nxt_pend_t  nxt_pend[NXT_PENDING_MAX];
+static int         nxt_npend = 0;
+static unsigned    nxt_frame = 1;
+static int         nxt_interval = 3;
+static int         nxt_ready = 0;    // 1 ready, -1 unavailable
+static u64         nxt_deferred = 0, nxt_flushed = 0;
+static u64         nxs_calls = 0, nxs_passed = 0, nxs_dedup0 = 0;
+static u64         nxs_win_calls = 0, nxs_win_passed = 0, nxs_win_def = 0, nxs_win_flush = 0, nxs_win_dedup = 0;
+static u64         nxs_win_ticks = 0, nxs_win_worst = 0;
+static unsigned    nxs_win_frames = 0;
+
+static void (*real_glActiveTexture)(unsigned);
+static void (*real_glPixelStorei)(unsigned, int);
+static void (*real_glDeleteTextures)(int, const unsigned *);
+
+static int nxt_init(void) {
+  if (nxt_ready) return nxt_ready > 0;
+  if (!real_glGetIntegerv)    real_glGetIntegerv    = nxg_getproc("glGetIntegerv");
+  if (!real_glActiveTexture)  real_glActiveTexture  = nxg_getproc("glActiveTexture");
+  if (!real_glPixelStorei)    real_glPixelStorei    = nxg_getproc("glPixelStorei");
+  nxt_ready = (real_glGetIntegerv && real_glActiveTexture && real_glPixelStorei &&
+               real_glBindTexture) ? 1 : -1;
+  printf("[uploads] rate limit every %d frames: %s\n", nxt_interval,
+         nxt_ready > 0 ? "active" : "unavailable");
+  fflush(stdout);
+  return nxt_ready > 0;
+}
+
+static void nxt_drop(unsigned tex, int lvl /* -1 = every level */) {
+  if (!nxt_npend) return;
+  for (int i = 0; i < NXT_PENDING_MAX; ++i) {
+    nxt_pend_t *e = &nxt_pend[i];
+    if (e->used && e->tex == tex && (lvl < 0 || e->lvl == (unsigned)lvl)) {
+      e->used = 0;
+      nxt_npend--;
+    }
+  }
+}
+
+// Returns 1 if the upload was kept for later and must not be sent now.
+static int nxt_defer(unsigned tgt, int lvl, int x, int y, int w, int h,
+                     unsigned fmt, unsigned typ, const void *px) {
+  if (nxt_interval <= 1 || !px || tgt != 0x0DE1 /* GL_TEXTURE_2D */) return 0;
+  const unsigned tex = nxd_bound_tex;
+  if (!tex || w <= 0 || h <= 0) return 0;
+  if (!nxt_init()) return 0;
+
+  nxt_state_t *st = &nxt_state[tex % NXT_TEX_SLOTS];
+  if (st->tex != tex) {                 // first sight of this texture
+    st->tex = tex;
+    st->last = nxt_frame;
+    return 0;
+  }
+  const int due = (st->last == nxt_frame) ||
+                  (nxt_frame - st->last >= (unsigned)nxt_interval);
+  if (due) {
+    st->last = nxt_frame;
+    // a fresh upload for this region supersedes any held one
+    for (int i = 0; nxt_npend && i < NXT_PENDING_MAX; ++i) {
+      nxt_pend_t *e = &nxt_pend[i];
+      if (e->used && e->tex == tex && e->lvl == (unsigned)lvl &&
+          e->x == (unsigned)x && e->y == (unsigned)y &&
+          e->w == (unsigned)w && e->h == (unsigned)h) { e->used = 0; nxt_npend--; }
+    }
+    return 0;
+  }
+
+  const unsigned bpp = nxd_bpp(fmt, typ);
+  if (!bpp) return 0;
+  const unsigned size = (unsigned)w * (unsigned)h * bpp;
+  if (!size || size > NXT_MAX_BYTES) return 0;
+  int row = 0, align = 4, unit = 0;
+  real_glGetIntegerv(0x0CF2, &row);
+  real_glGetIntegerv(0x0CF5, &align);
+  if (row != 0 && row != w) return 0;
+  if (align > 1 && ((unsigned)w * bpp) % (unsigned)align != 0) return 0;
+  real_glGetIntegerv(0x84E0 /* GL_ACTIVE_TEXTURE */, &unit);
+  if (unit < 0x84C0) return 0;
+
+  nxt_pend_t *slot = NULL;
+  for (int i = 0; i < NXT_PENDING_MAX; ++i) {
+    nxt_pend_t *e = &nxt_pend[i];
+    if (e->used) {
+      if (e->tex == tex && e->lvl == (unsigned)lvl && e->x == (unsigned)x &&
+          e->y == (unsigned)y && e->w == (unsigned)w && e->h == (unsigned)h) { slot = e; break; }
+    } else if (!slot) {
+      slot = e;
+    }
+  }
+  if (!slot) return 0;                  // table full: send it now
+  if (!slot->data || slot->size < size) {
+    unsigned char *nd = realloc(slot->data, size > 4096 ? size : 4096);
+    if (!nd) return 0;
+    slot->data = nd;
+  }
+  if (!slot->used) { slot->used = 1; nxt_npend++; }
+  memcpy(slot->data, px, size);
+  slot->tex = tex; slot->unit = (unsigned)unit; slot->lvl = (unsigned)lvl;
+  slot->x = (unsigned)x; slot->y = (unsigned)y; slot->w = (unsigned)w; slot->h = (unsigned)h;
+  slot->fmt = fmt; slot->typ = typ; slot->size = size;
+  nxt_deferred++;
+  return 1;
+}
+
+// End of frame: send what is due and was not superseded by a fresh upload.
+static void nxt_flush(void) {
+  if (!nxt_npend || nxt_ready <= 0 || !real_glTexSubImage2D) return;
+  int row = 0, align = 4, unit0 = 0;
+  real_glGetIntegerv(0x0CF2, &row);
+  real_glGetIntegerv(0x0CF5, &align);
+  real_glGetIntegerv(0x84E0, &unit0);
+  int unit_cur = unit0;
+  int changed_store = 0;
+
+  for (int i = 0; i < NXT_PENDING_MAX; ++i) {
+    nxt_pend_t *e = &nxt_pend[i];
+    if (!e->used) continue;
+    nxt_state_t *st = &nxt_state[e->tex % NXT_TEX_SLOTS];
+    if (st->tex == e->tex && nxt_frame - st->last < (unsigned)nxt_interval) continue;
+
+    if (!changed_store) {
+      if (row != 0) real_glPixelStorei(0x0CF2, 0);
+      if (align != 1) real_glPixelStorei(0x0CF5, 1);
+      changed_store = 1;
+    }
+    if ((int)e->unit != unit_cur) { real_glActiveTexture(e->unit); unit_cur = (int)e->unit; }
+    int old = 0;
+    real_glGetIntegerv(0x8069 /* GL_TEXTURE_BINDING_2D */, &old);
+    real_glBindTexture(0x0DE1, e->tex);
+    real_glTexSubImage2D(0x0DE1, (int)e->lvl, (int)e->x, (int)e->y, (int)e->w, (int)e->h,
+                         e->fmt, e->typ, e->data);
+    real_glBindTexture(0x0DE1, (unsigned)old);
+    st->tex = e->tex;
+    st->last = nxt_frame;
+    e->used = 0;
+    nxt_npend--;
+    nxt_flushed++;
+  }
+  if (unit_cur != unit0) real_glActiveTexture((unsigned)unit0);
+  if (changed_store) {
+    if (row != 0) real_glPixelStorei(0x0CF2, row);
+    if (align != 1) real_glPixelStorei(0x0CF5, align);
+  }
+}
+
+static void wrap_glDeleteTextures(int n, const unsigned *ids) {
+  if (!real_glDeleteTextures) return;
+  for (int i = 0; ids && i < n; ++i) {
+    nxt_drop(ids[i], -1);
+    nxt_state_t *st = &nxt_state[ids[i] % NXT_TEX_SLOTS];
+    if (st->tex == ids[i]) st->tex = 0;
+  }
+  real_glDeleteTextures(n, ids);
+}
+
 #if NXP_PROFILE
 static u64 nxp_seen_tex, nxp_seen_sub;     // counter snapshot at previous swap
 
@@ -821,6 +1002,7 @@ static inline double nxp_ms(u64 ticks) {
 static void wrap_glTexImage2D(unsigned tgt, int lvl, int ifmt, int w, int h,
                               int bdr, unsigned fmt, unsigned typ, const void *px) {
   if (!real_glTexImage2D) return;
+  if (tgt == 0x0DE1 && nxd_bound_tex) nxt_drop(nxd_bound_tex, lvl);
 #if NXP_PROFILE
   const u64 t0 = armGetSystemTick();
   real_glTexImage2D(tgt, lvl, ifmt, w, h, bdr, fmt, typ, px);
@@ -932,11 +1114,14 @@ static int nxpbo_upload(unsigned tgt, int lvl, int x, int y, int w, int h,
 static void wrap_glTexSubImage2D(unsigned tgt, int lvl, int x, int y, int w, int h,
                                  unsigned fmt, unsigned typ, const void *px) {
   if (!real_glTexSubImage2D) return;
+  nxs_calls++;
   if (nxd_is_duplicate(nxd_bound_tex, (unsigned)lvl, (unsigned)x, (unsigned)y,
                        (unsigned)w, (unsigned)h, fmt, typ, px)) {
     nxd_skipped++;
     return;
   }
+  if (nxt_defer(tgt, lvl, x, y, w, h, fmt, typ, px)) return;
+  nxs_passed++;
 #if NXP_PROFILE
   const u64 t0 = armGetSystemTick();
   if (!nxpbo_upload(tgt, lvl, x, y, w, h, fmt, typ, px))
@@ -970,6 +1155,7 @@ static void nxgy_check_toggle(void) {
 }
 
 static void wrap_SDL_GL_SwapWindow(SDL_Window *win) {
+  nxt_flush();
 #if NXP_PROFILE
   {
     const u64 ts = armGetSystemTick();
@@ -980,7 +1166,36 @@ static void wrap_SDL_GL_SwapWindow(SDL_Window *win) {
   SDL_GL_SwapWindow(win);
 #endif
 
+  nxt_frame++;
+
   const u64 now = armGetSystemTick();
+  if (nxp_frame_mark) {
+    const u64 d = now - nxp_frame_mark;
+    nxs_win_ticks += d;
+    if (d > nxs_win_worst) nxs_win_worst = d;
+    if (++nxs_win_frames >= 180) {
+      FILE *sf = fopen("../nxstats.txt", "w");
+      if (sf) {
+        const double fq = (double)armGetSystemTickFreq();
+        const double n = (double)nxs_win_frames;
+        fprintf(sf, "interval=%d active=%d\n", nxt_interval, nxt_ready);
+        fprintf(sf, "last %u frames: avg %.1f ms (%.1f fps), worst %.1f ms\n", nxs_win_frames,
+                1000.0 * (double)nxs_win_ticks / fq / n, n * fq / (double)nxs_win_ticks,
+                1000.0 * (double)nxs_win_worst / fq);
+        fprintf(sf, "per frame: sub-uploads asked %.1f | identical skipped %.1f | held back %.1f | sent late %.1f | sent now %.1f\n",
+                (double)(nxs_calls - nxs_win_calls) / n,
+                (double)(nxd_skipped - nxs_win_dedup) / n,
+                (double)(nxt_deferred - nxs_win_def) / n,
+                (double)(nxt_flushed - nxs_win_flush) / n,
+                (double)(nxs_passed - nxs_win_passed) / n);
+        fprintf(sf, "pending now: %d\n", nxt_npend);
+        fclose(sf);
+      }
+      nxs_win_calls = nxs_calls; nxs_win_passed = nxs_passed; nxs_win_def = nxt_deferred;
+      nxs_win_flush = nxt_flushed; nxs_win_dedup = nxd_skipped;
+      nxs_win_ticks = 0; nxs_win_worst = 0; nxs_win_frames = 0;
+    }
+  }
 
   if (nxp_frame_mark) {
     const u64 dt  = now - nxp_frame_mark;
@@ -1157,6 +1372,7 @@ static void nxgy_load_cfg(void) {
     else if (!strcmp(key, "movecurve")) nxgy_curve = val;
     else if (!strcmp(key, "deadzone"))  nxgy_dead  = val;
     else if (!strcmp(key, "pbo"))       nxpbo_enabled = (int)val;
+    else if (!strcmp(key, "uploadinterval")) { nxt_interval = (int)val; if (nxt_interval < 1) nxt_interval = 1; if (nxt_interval > 8) nxt_interval = 8; }
     else if (!strcmp(key, "enabled"))   nxgy_on    = (int)val;
     else if (!strcmp(key, "driftmode")) nxgy_drift = (int)val;
     else if (!strcmp(key, "debug"))     nxgy_dbg   = (int)val;
@@ -1334,6 +1550,16 @@ static void *wrap_SDL_GL_GetProcAddress(const char *name) {
     real_glBindTexture = SDL_GL_GetProcAddress(name);
     if (!real_glBindTexture) return NULL;
     return wrap_glBindTexture;
+  } else if (!strcmp(name, "glDeleteTextures")) {
+    real_glDeleteTextures = nxg_getproc(name);
+    if (!real_glDeleteTextures) return NULL;
+    return wrap_glDeleteTextures;
+  } else if (!strcmp(name, "glActiveTexture")) {
+    real_glActiveTexture = nxg_getproc(name);
+    return real_glActiveTexture;
+  } else if (!strcmp(name, "glPixelStorei")) {
+    real_glPixelStorei = nxg_getproc(name);
+    return real_glPixelStorei;
   } else if (!strcmp(name, "glGetIntegerv")) {
     real_glGetIntegerv = SDL_GL_GetProcAddress(name);
     return real_glGetIntegerv;
