@@ -1,47 +1,45 @@
-## UnrealNX (fork)
+## unreal_nx-fw21 (unofficial fork)
+
+> **This is an unofficial fork of [fgsfdsfgs/unreal_nx](https://github.com/fgsfdsfgs/unreal_nx). It is not an official
+> release and it is not made by fgsfds.** The loader, the relocation and patching code and the whole idea are his work;
+> this fork builds on top of it. If you want the original, go to his repository.
 
 This is a Switch port/loader for Unreal and Unreal Gold.
 It loads the aarch64-linux binaries supplied with the 227j patch for Unreal/Unreal Gold, patches them and runs them,
 similar in function to the [Max Payne Mobile loader](https://github.com/fgsfdsfgs/max_nx).
 
-This is a fork of [fgsfdsfgs/unreal_nx](https://github.com/fgsfdsfgs/unreal_nx). The loader, the relocation and patching
-code and the whole idea are fgsfds' work; this fork builds on top of it. Everything that changed is listed below.
-
-**Unreal and Unreal Gold on the Nintendo Switch, with gyro aiming, dynamic lights that run at playable speed,
-quick save, and no crash when you exit the game.**
+**Unreal and Unreal Gold on the Nintendo Switch for firmware 21+: dynamic lights that run at playable speed with the
+stock renderer, gyro aiming, quick save, and no crash when you exit the game.**
 
 ### What you need
 
 1. Your own copy of **Unreal** or **Unreal Gold**. No game files are included here.
 2. The free **[OldUnreal 227j patch](https://www.oldunreal.com/phpBB3/viewtopic.php?f=51&t=10395)**, installed on that copy.
-   It provides the engine binaries this loader runs.
-3. The **zip from the [latest release](../../releases/latest)** of this repository. It has everything else:
-   `unreal.nro`, `gyro.cfg`, a rebuilt `OpenGLDrv.so` that replaces the one from the patch, and an `UnrealLinux.ini`
-   with dynamic lights on and the settings used for testing.
+   It provides the engine binaries and the renderer this loader runs.
+3. The **zip from the [latest release](../../releases/latest)** of this repository: `unreal.nro`, `gyro.cfg` and an
+   `UnrealLinux.ini` with dynamic lights on.
 
 Step-by-step instructions are in [How to install](#how-to-install).
 
 ### What this fork changes
 
-r2 runs the game, but lit scenes run slowly, exiting the game crashes the next launch, and builds made with older libnx
-conflict with current firmware. This fork is not only a rebuild: it goes into the renderer, which r2
-could only run as a closed binary, and fixes the performance problem at its source.
+fgsfds' r2 runs the game, but it does not start on current firmware, lit scenes run slowly, and exiting the game
+crashes the next launch. This fork fixes those, and adds gyro and quick save.
 
-**Headlines**
-
-* **Works on current firmware.** Rebuilt against libnx 4.12.0. Homebrew built with older libnx conflicts with the
-  thread-local storage layout of firmware 21.0.0+ / Atmosphère 1.10+.
-* **Dynamic lights are playable.** r2 suggested turning them off. The cost was never the lighting itself but re-uploading
-  lightmap textures: about half a millisecond for every texture touched, and a lit scene touched around a hundred per
-  frame. The renderer module, `OpenGLDrv.so`, is now **rebuilt from source** (OldUnreal's public
-  [Unreal-PubSrc](https://github.com/OldUnreal/Unreal-PubSrc)) with a setting, `NXLightUpdateInterval`, that refreshes
-  each lightmap at most once every N frames. In the heaviest scene tested a frame went from about 125 ms to about 19 ms,
-  with the lights still on. On top of that the loader skips identical texture uploads (about 85% of the calls).
+* **Works on firmware 21.0.0+ / Atmosphère 1.10+.** Rebuilt against libnx 4.12.0. Homebrew built with older libnx
+  conflicts with the thread-local storage layout introduced in firmware 21.0.0.
+* **Dynamic lights are playable, with the renderer that comes with the patch.** Every light update re-uploads a lightmap
+  texture, which costs about 0.5 to 1 ms per call on the Switch whatever its size, and a lit scene does dozens of them
+  per frame. The loader now limits how often a texture may be updated (`uploadinterval`, default 5 frames): the newest
+  update is kept and sent in time, so a texture never stays stale. Identical uploads are skipped as well. In a heavy
+  lit scene, with the stock `OpenGLDrv.so`, the frame time went from about 41 ms (24 fps) to about 29 ms (34 fps), and the
+  worst frames dropped a lot. These are measurements on one scene with the camera not in exactly the same spot, so take
+  them as indicative. The price is that a moving light updates a few frames late; `uploadinterval` is adjustable.
 * **Gyro aiming**, read at the sensor's full rate, tunable in `gyro.cfg`, switched on and off with L3+R3.
 * **Quick save** on MINUS.
 * **Exiting no longer crashes the next launch**, so there is no need to quit out of hbmenu. This is a fix in
-  [libsolder](https://github.com/jackazz86/libsolder): module destructors are skipped while the process is shutting
-  down (they were crashing in `free()`); the modules are still unmapped as before.
+  [libsolder](libsolder/README-FORK.md) (included in this repository): module destructors are skipped while the process
+  is shutting down (they were crashing in `free()`); the modules are still unmapped as before.
 
 **Smaller changes**
 
@@ -49,6 +47,8 @@ could only run as a closed binary, and fixes the performance problem at its sour
 * A and B follow the Nintendo layout in menus (A confirms, B goes back); they were swapped.
 * MINUS no longer opens the on-screen keyboard, which means the on-screen keyboard can no longer be brought up.
 * A failed `dlopen` now prints the real reason (for example a missing symbol) instead of only "Can't find file for package".
+* `nxstats.txt` (in `/switch/unreal/`) is rewritten every 180 frames with the average frame time, the worst frame and how
+  many texture uploads were asked for, skipped, held back and sent. Useful for tuning `uploadinterval` or for bug reports.
 * A built-in profiler (frame, file and GL call timing over nxlink), compiled out by default.
 
 See [CHANGELOG.md](CHANGELOG.md) for the same list in release-notes form.
@@ -66,10 +66,9 @@ To install:
 2. Copy the contents of your `Unreal` or `UnrealGold` folder into `/switch/unreal/`.
 3. Extract the contents of the `.zip` file from the latest release into `/switch/unreal/`. Replace everything.
 
-The zip contains `unreal.nro`, `gyro.cfg`, `SystemARM/OpenGLDrv.so` and `SystemARM/UnrealLinux.ini`.
-`OpenGLDrv.so` **replaces** the one that came with the 227j patch; if you ever want the stock one back, rerun the patch
-installer. `UnrealLinux.ini` is replaced too, as it was in r2, so if you have changed renderer settings in it, keep a copy.
-Your `User.ini` (player, keys, field of view) is not touched.
+The zip contains `unreal.nro`, `gyro.cfg` and `SystemARM/UnrealLinux.ini`. The renderer (`OpenGLDrv.so`) is the one
+installed by the patch and is not replaced. `UnrealLinux.ini` is replaced, as it was in r2, so if you have changed
+renderer settings in it, keep a copy. Your `User.ini` (player, keys, field of view) is not touched.
 
 No game assets and no closed engine binaries are included in the zip.
 
@@ -101,15 +100,15 @@ start; change a number, relaunch, try. Every setting is documented inside the fi
 
 ### Dynamic lights
 
-They are on by default, and that is how the shipped `UnrealLinux.ini` is set. The only related setting you may want to
-change is in `SystemARM/UnrealLinux.ini`, section `[OpenGLDrv.OpenGLRenderDevice]`:
+They are on by default, and that is how the shipped `UnrealLinux.ini` is set. The setting that matters is in
+`/switch/unreal/gyro.cfg`:
 
 ```
-NXLightUpdateInterval=3
+uploadinterval = 5
 ```
 
-`1` updates lightmaps every frame (best looking, slowest). `3` is the default. Higher values are faster, at the cost of
-lights reacting a little later to a moving light source.
+`1` updates lightmaps every frame (best looking, slowest, the same as r2). `5` is the default. Lower values look
+better when a light moves; higher values are faster in the heaviest scenes. The range is 1 to 8.
 
 Volumetric lighting is turned off in the shipped file because it costs speed for a small visual gain. To get it back, set
 `VolumetricLighting` to `True` (it appears twice in the file).
@@ -134,11 +133,11 @@ or unpatched Unreal Gold install and replace the one in `/switch/unreal/Textures
 
 You can enable the advanced XOpenGL renderer, though it hasn't been tested much, does not seem to improve performance
 and will probably explode. To do that, in `SystemARM/UnrealLinux.ini` change `GameRenderDevice=OpenGLDrv.OpenGLRenderDevice` to `GameRenderDevice=XOpenGLDrv.XOpenGLRenderDevice`.
-The rebuilt `OpenGLDrv.so` only replaces the default renderer.
+The upload limit only applies to the default renderer path it was measured on.
 
 If the game crashes, usually there will be a message on the screen telling you the reason.
 It will also create logs at `SystemARM/fatal.log` and `SystemARM/UnrealLinux.log`.
-Please attach these to issue reports when possible, along with the last Atmosphere crash report.
+Please attach these to issue reports when possible, along with the last Atmosphère crash report.
 
 ### How to build
 
@@ -153,7 +152,8 @@ You're going to need devkitA64, libnx and the following libraries:
 * switch-libsodium
 * switch-openal
 * devkitpro-pkgbuild-helpers
-* [libsolder](https://github.com/jackazz86/libsolder) (this fork, not the original: it has the exit crash fix; use `make install` to build and install)
+* libsolder: the copy in the [`libsolder`](libsolder) folder of this repository, which has the exit crash fix
+  (`make -C libsolder install`). It is a fork of [fgsfdsfgs/libsolder](https://github.com/fgsfdsfgs/libsolder).
 * [libiconv-switch](https://github.com/snaiperskaya96/libiconv-switch) (use `./build-switch.sh` to build and install)
 * libsndfile
 * libxmp
@@ -165,21 +165,17 @@ The rest can be obtained using `(dkp-)pacman`.
 After you've obtained all the dependencies and ensured devkitA64 is properly installed and the `DEVKITPRO` environment variable is set,
 build this repository using the commands:
 ```
-git clone https://github.com/jackazz86/unreal_nx.git && cd unreal_nx
+git clone https://github.com/jackazz86/unreal_nx-fw21.git && cd unreal_nx-fw21
 source $DEVKITPRO/switchvars.sh
+make -C libsolder install
 make
 ```
 
 To turn on the built-in profiler, set `NXP_PROFILE` to `1` near the top of `source/exports.c`, rebuild, and run through `nxlink -s`.
 
-`OpenGLDrv.so` is built separately from a fork of OldUnreal's public source:
-[jackazz86/Unreal-PubSrc](https://github.com/jackazz86/Unreal-PubSrc), see the `switch/` folder there.
-
 ### Credits
 * fgsfds for unreal_nx and libsolder, which this fork is built on;
-* OldUnreal for the 227j patch and for publishing the source of the renderer;
-* Smirftsch of OldUnreal, who kindly took the time to answer by email about redistributing the rebuilt renderer;
-* Chris Dohnal, author of UTGLR, which `OpenGLDrv` is derived from;
+* OldUnreal for the 227j patch, which provides the engine this loader runs;
 * Switchbrew for libnx;
 * devkitPro for devkitA64.
 
@@ -190,8 +186,7 @@ The full source and build instructions for this program are in this repository, 
 versions of those libraries.
 
 ### Legal
-This project is a fork of [fgsfdsfgs/unreal_nx](https://github.com/fgsfdsfgs/unreal_nx), released under the same MIT license.
-It has no direct affiliation with Epic Games or OldUnreal.
-No game assets and no closed program code from the original game are included. `OpenGLDrv.so` is compiled from source code
-publicly released by OldUnreal ([Unreal-PubSrc](https://github.com/OldUnreal/Unreal-PubSrc)), a modified version of Chris Dohnal's UTGLR;
-OldUnreal confirmed they place no restriction on it.
+This project is an unofficial fork of [fgsfdsfgs/unreal_nx](https://github.com/fgsfdsfgs/unreal_nx), released under the same MIT license.
+It has no direct affiliation with Epic Games, OldUnreal or fgsfds.
+No game assets and no program code from the original game are included: the engine and the renderer are the ones
+installed by the OldUnreal patch, which you provide.

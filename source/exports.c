@@ -833,7 +833,7 @@ static nxt_state_t nxt_state[NXT_TEX_SLOTS];
 static nxt_pend_t  nxt_pend[NXT_PENDING_MAX];
 static int         nxt_npend = 0;
 static unsigned    nxt_frame = 1;
-static int         nxt_interval = 3;
+static int         nxt_interval = 5;
 static int         nxt_ready = 0;    // 1 ready, -1 unavailable
 static u64         nxt_deferred = 0, nxt_flushed = 0;
 static u64         nxs_calls = 0, nxs_passed = 0, nxs_dedup0 = 0;
