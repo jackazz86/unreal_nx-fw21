@@ -186,7 +186,7 @@ To turn on the built-in profiler, set `NXP_PROFILE` to `1` near the top of `sour
 The `.nro` is linked statically against the libraries listed under "How to build". Three of them, OpenAL Soft,
 libsndfile and libiconv, are LGPL; the others (libxmp, alure, Xiph libraries, SDL2, libpng, zlib, libsodium, Mesa)
 use permissive licenses. [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) lists them with their licenses and includes
-the license texts; it is also in the release zip. The full source and build instructions for this program are in this
+the license texts; the release zip has them as a single `LICENSES.txt`, together with the licenses of unreal_nx and libsolder. The full source and build instructions for this program are in this
 repository, so it can be relinked against other versions of those libraries.
 
 ### Legal
