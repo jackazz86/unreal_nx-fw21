@@ -183,10 +183,11 @@ To turn on the built-in profiler, set `NXP_PROFILE` to `1` near the top of `sour
 * devkitPro for devkitA64.
 
 ### Third-party libraries
-The `.nro` is linked statically against the libraries listed under "How to build". Several of them, such as OpenAL Soft,
-libxmp, libsndfile and libiconv, are LGPL; the others use permissive licenses. See each project for its exact terms.
-The full source and build instructions for this program are in this repository, so it can be relinked against other
-versions of those libraries.
+The `.nro` is linked statically against the libraries listed under "How to build". Three of them, OpenAL Soft,
+libsndfile and libiconv, are LGPL; the others (libxmp, alure, Xiph libraries, SDL2, libpng, zlib, libsodium, Mesa)
+use permissive licenses. [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) lists them with their licenses and includes
+the license texts; it is also in the release zip. The full source and build instructions for this program are in this
+repository, so it can be relinked against other versions of those libraries.
 
 ### Legal
 This project is an unofficial fork of [fgsfdsfgs/unreal_nx](https://github.com/fgsfdsfgs/unreal_nx), released under the same MIT license.
